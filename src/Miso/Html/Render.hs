@@ -80,11 +80,12 @@ import           Data.Set (Set)
 import           Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Map.Strict as M
-import           Unsafe.Coerce (unsafeCoerce)
 #ifdef SSR
 import           Control.Exception (SomeException, catch)
 import           System.IO.Unsafe (unsafePerformIO)
 #endif
+----------------------------------------------------------------------------
+import           GHC.StaticPtr
 ----------------------------------------------------------------------------
 import           Miso.JSON
 import           Miso.String hiding (intercalate)
@@ -96,14 +97,14 @@ class ToHtml a where
   toHtml :: a -> L.ByteString
 ----------------------------------------------------------------------------
 -- | Render a @Miso.Types.View@ to a @L.ByteString@
-instance ToHtml (Miso.Types.View m a) where
+instance ToHtml (View a) where
   toHtml = renderView
 ----------------------------------------------------------------------------
 -- | Render a @[Miso.Types.View]@ to a @L.ByteString@
-instance ToHtml [Miso.Types.View m a] where
+instance ToHtml [View a] where
   toHtml = foldMap renderView
 ----------------------------------------------------------------------------
-renderView :: View m a -> L.ByteString
+renderView :: View a -> L.ByteString
 renderView = toLazyByteString . renderBuilder
 ----------------------------------------------------------------------------
 intercalate :: Builder -> [Builder] -> Builder
@@ -149,7 +150,7 @@ booleanProperties = S.fromList
   , "truespeed"
   ]
 ----------------------------------------------------------------------------
-renderBuilder :: forall m a . Miso.Types.View m a -> Builder
+renderBuilder :: View a -> Builder
 renderBuilder (VText _ "")    = fromMisoString " "
 renderBuilder (VText _ s)     = fromMisoString s
 renderBuilder (VNode _ "doctype" [] []) = "<!doctype html>"
@@ -183,13 +184,13 @@ renderBuilder (VNode ns tag attrs children) = mconcat
               , x <- ["mglyph", "mprescripts", "none", "maligngroup", "malignmark" ]
               ]
 
-renderBuilder (VComp _ (SomeComponent props vcomp_)) =
-  foldMap renderBuilder vkids
-    where
+renderBuilder (VComp ptr) =
+  case deRefStaticPtr ptr of
+    SomeComponent _key props vcomp_ ->
 #ifdef SSR
-      vkids = [ unsafeCoerce $ view vcomp_ props (getInitialComponentModel vcomp_) ]
+      renderBuilder (view vcomp_ props (getInitialComponentModel vcomp_))
 #else
-      vkids = [ unsafeCoerce $ view vcomp_ props (model vcomp_) ]
+      renderBuilder (view vcomp_ props (model vcomp_))
 #endif
 renderBuilder (VFrag _ kids) = foldMap renderBuilder kids
 ----------------------------------------------------------------------------
@@ -238,7 +239,7 @@ renderAttrs (Styles styles_) =
 -- | The browser can't distinguish between multiple text nodes
 -- and a single text node. So it will always parse a single text node
 -- this means we must collapse adjacent text nodes during hydration.
-collapseSiblingTextNodes :: [View m a] -> [View m a]
+collapseSiblingTextNodes :: [View a] -> [View a]
 collapseSiblingTextNodes [] = []
 collapseSiblingTextNodes (VText _ x : VText k y : xs) =
   collapseSiblingTextNodes (VText k (x <> y) : xs)
@@ -262,7 +263,7 @@ toHtmlFromJSON (Array a)    = fromMisoString $ ms (show a)
 -- We use 'unsafePerformIO' here because @servant@'s 'MimeRender' is a pure function
 -- yet we need to allow the users to hydrate in 'IO'.
 --
-getInitialComponentModel :: Component parent props model action -> model
+getInitialComponentModel :: Component props model action -> model
 getInitialComponentModel Component {..} =
   case hydrateModel of
     Nothing -> model

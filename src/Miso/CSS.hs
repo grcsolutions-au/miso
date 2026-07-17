@@ -696,7 +696,7 @@ renderStyles indent (Media name frames) = MS.intercalate " "
 -- @\<style\>@ tag.
 --
 -- @
--- view_ :: View model action
+-- view_ :: View action
 -- view_ = style [] [ text (renderStyleSheet mySheet) ]
 -- @
 --

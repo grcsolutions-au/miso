@@ -66,7 +66,7 @@ import           Control.Monad
 -----------------------------------------------------------------------------
 import           Miso.DSL ((!), jsg, setField)
 import qualified Miso.FFI.Internal as FFI
-import           Miso.Types (Component(..), Events, App)
+import           Miso.Types (Component(..), Events, SomeComponent(..))
 import           Miso.String (MisoString)
 import           Miso.Runtime (componentModel, initComponent, topLevelComponentId, Hydrate(..))
 import           Miso.Runtime.Internal (components, schedulerThread)
@@ -75,6 +75,7 @@ import           Miso.Lens
 -----------------------------------------------------------------------------
 import qualified Data.IntMap.Strict as IM
 import           Data.IORef
+import           GHC.StaticPtr
 import           Foreign hiding (void)
 import           Foreign.C.Types
 -----------------------------------------------------------------------------
@@ -109,21 +110,22 @@ foreign import ccall unsafe "miso_x_clear"
 --
 -- @since 1.9.0.0
 reload
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Event delegation map (typically 'Miso.Event.Types.defaultEvents')
-  -> App model action
+  -> StaticPtr SomeComponent
   -- ^ Top-level application component to (re-)mount
   -> IO ()
-reload events vcomp = do
-  exists <- x_exists
-  when (exists == 1) $ do
-    (_, oldSchedulerRef) <- deRefStablePtr =<< x_get
-    killThread =<< readIORef oldSchedulerRef
-    x_clear
-  clearPage
-  void (initComponent events Draw False vcomp)
-  x_store =<< newStablePtr (components, schedulerThread)
+reload events ptr = do
+  case deRefStaticPtr ptr of
+    SomeComponent key props comp -> do
+      exists <- x_exists
+      when (exists == 1) $ do
+        (_, oldSchedulerRef) <- deRefStablePtr =<< x_get
+        killThread =<< readIORef oldSchedulerRef
+        x_clear
+      clearPage
+      void (initComponent events Draw False comp key props (staticKey ptr))
+      x_store =<< newStablePtr (components, schedulerThread)
 -----------------------------------------------------------------------------
 -- | Live reloading. Persists all t'Component' `model` between successive GHCi reloads.
 --
@@ -144,44 +146,45 @@ reload events vcomp = do
 --
 -- @since 1.9.0.0
 live
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Event delegation map (typically 'Miso.Event.Types.defaultEvents')
-  -> App model action
+  -> StaticPtr SomeComponent
   -- ^ Top-level application component to (re-)mount with preserved model state
   -> IO ()
-live events vcomp = do
-  exists <- x_exists
-  if exists == 1
-    then do
-      -- clearBody (only clear the body)
-      clearBody
-
-      -- Deref old state, update new state, set pointer in C heap.
-      (oldComponentsRef, oldSchedulerRef) <- deRefStablePtr =<< x_get
-      killThread =<< readIORef oldSchedulerRef
-
-      _oldState <- readIORef oldComponentsRef
-      let oldModel = (_oldState IM.! topLevelComponentId) ^. componentModel
-          initialVComp = vcomp { model = oldModel }
-
-      -- Overwrite new components state with old components state
-      atomicWriteIORef components _oldState
-
-      -- Perform initial draw, this will fetch the model from the old component state
-      -- and overwrite the old state with the new state for everything else.
-      initComponent events Draw True initialVComp
-
-      -- Don't forget to flush (native mobile needs this too)
-      FFI.flush
-
-      -- Clear and set static ptr to use new state (new CAF state)
-      x_clear
-      x_store =<< newStablePtr (components, schedulerThread)
-    else do
-      -- This means it is initial load, just store the pointer.
-      void (initComponent events Draw False vcomp)
-      x_store =<< newStablePtr (components, schedulerThread)
+live events ptr = do
+  case deRefStaticPtr ptr of
+    SomeComponent key props vcomp -> do
+      exists <- x_exists
+      if exists == 1
+        then do
+          -- clearBody (only clear the body)
+          clearBody
+    
+          -- Deref old state, update new state, set pointer in C heap.
+          (oldComponentsRef, oldSchedulerRef) <- deRefStablePtr =<< x_get
+          killThread =<< readIORef oldSchedulerRef
+    
+          _oldState <- readIORef oldComponentsRef
+          let oldModel = (_oldState IM.! topLevelComponentId) ^. componentModel
+              initialVComp = vcomp { model = oldModel }
+    
+          -- Overwrite new components state with old components state
+          atomicWriteIORef components _oldState
+    
+          -- Perform initial draw, this will fetch the model from the old component state
+          -- and overwrite the old state with the new state for everything else.
+          initComponent events Draw True initialVComp key props (staticKey ptr)
+    
+          -- Don't forget to flush (native mobile needs this too)
+          FFI.flush
+    
+          -- Clear and set static ptr to use new state (new CAF state)
+          x_clear
+          x_store =<< newStablePtr (components, schedulerThread)
+        else do
+          -- This means it is initial load, just store the pointer.
+          void (initComponent events Draw False vcomp key props (staticKey ptr))
+          x_store =<< newStablePtr (components, schedulerThread)
 -----------------------------------------------------------------------------
 clearPage, clearBody, clearHead :: IO ()
 clearPage = clearBody >> clearHead

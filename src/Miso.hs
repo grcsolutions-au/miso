@@ -1,5 +1,7 @@
 -----------------------------------------------------------------------------
-{-# LANGUAGE CPP                       #-}
+{-# LANGUAGE CPP            #-}
+{-# LANGUAGE LambdaCase     #-}
+{-# LANGUAGE StaticPointers #-}
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Wno-duplicate-exports #-}
 -----------------------------------------------------------------------------
@@ -102,33 +104,31 @@
 -- import qualified "Miso.Html.Event" as HE
 -- import qualified "Miso.Html.Property" as HP
 -- -----------------------------------------------------------------------------
---                       * - The type of the parent 'Component' 'model'
---                       |    * - The type of the parent 'Component' 'props' accessible to the child
---                       |    |   * - The type of the current 'Component' 'model'
---                       |    |   |   * - The type of the action that updates the 'model'
---                       |    |   |   |
--- counter :: 'Component' 'ROOT' () 'Int' Action
--- counter = 'vcomp' m u v
+--                       * - The type of the parent 'Component' 'props' accessible to the child
+--                       |     * - The type of the current 'Component' 'model'
+--                       |     |     * - The type of the action that updates the 'model'
+--                       |     |     |
+-- counter :: 'Component' () 'Int' Action
+-- counter = 'component' m u v
 --   where
 --     -- | Initial 'model' value
 --     m :: 'Int'
 --     m = 0
---                             * - The type of the parent 'Component' 'model'
---                             |   * - The type of the parent 'Component' 'props' accessible to the child
---                             |   |   * - The type of the current 'Component' 'model'
---                             |   |   |   * - The type of the action that updates the 'model'
---                             |   |   |   |
---     u :: Action -> 'Effect' 'ROOT' () 'Int' Action
+--                             * - The type of the parent 'Component' 'props' accessible to the child
+--                             |   * - The type of the current 'Component' 'model'
+--                             |   |   * - The type of the action that updates the 'model'
+--                             |   |   |
+--     u :: Action -> 'Effect' () 'Int' Action
 --     u = \\case
 --       Add -> 'Miso.Lens.this' 'Miso.Lens.+=' 1
 --       Subtract -> 'Miso.Lens.this' 'Miso.Lens.-=' 1
 --
 --           * - The type of the parent 'Component' props
 --           |      * - The type of the current 'Component' 'model'
---           |      |          * - The type of the 'Component' 'model' (used for 'Component' mounting with '+>')
---           |      |          |  * - The type of the action that updates 'Component' 'model'
---           |      |          |  |
---     v :: () -> 'Int' -> 'View' 'Int' Action
+--           |      |               * - The type of the action that updates 'Component' 'model'
+--           |      |               |
+--           |      |               |
+--     v :: () -> 'Int' -> 'View' Action
 --     v _props x = 'vfrag'
 --       [ H.'Miso.Html.Element.button_' [ HE.'Miso.Html.Event.onClick' Add, HP.'Miso.Html.Property.id_' "add" ] [ "+" ]
 --       , 'text' ('ms' x)
@@ -184,16 +184,8 @@
 -- The 'App' type synonym is defined as:
 --
 -- @
--- type 'App' model action = 'Component' 'ROOT' () model action
+-- type 'App' model action = 'Component' () model action
 -- @
---
--- 'ROOT' is a type tag for top-level 'Component' — one with no @parent@.
---
--- @
--- data 'ROOT'
--- @
---
--- 'startApp' and 'miso' will always infer @parent@ as 'ROOT'.
 --
 -- = t'View' DSL
 --
@@ -201,26 +193,26 @@
 -- of nodes mutually recursive with 'Component' via the 'view' function.
 --
 -- @
--- data 'View' model action
---   = 'VNode' 'Namespace' 'Tag' ['Attribute' action] ['View' model action]
+-- data 'View' action
+--   = 'VNode' 'Namespace' 'Tag' ['Attribute' action] ['View' action]
 --   | 'VText' (Maybe 'Key') 'MisoString'
---   | 'VComp' (Maybe 'Key') ('SomeComponent' model)
---   | 'VFrag' (Maybe 'Key') ['View' model action]
+--   | 'VComp' (Maybe 'Key') 'SomeComponent'
+--   | 'VFrag' (Maybe 'Key') ['View' action]
 -- @
 --
 -- 'VNode' and 'VText' have a one-to-one mapping from the virtual DOM to the physical DOM. The 'VComp' and 'VFrag' constructors are abstract (live only on the virtual DOM) and do not contain a reference to the physical DOM. The existential 'SomeComponent' is what allows embedding polymorphic 'Component' within a 'View'.
 --
 -- @
--- data 'SomeComponent' parent
+-- data 'SomeComponent'
 --   = forall model action props . ('Eq' model, 'Eq' props)
---   => 'SomeComponent' props ('Component' parent props model action)
+--   => 'SomeComponent' props ('GHC.Static.StaticPtr' ('Component' props model action))
 -- @
 --
 -- The smart constructors:
 --
 -- * 'node', 'vnode' — build a 'VNode'
 -- * 'text', 'vtext' — build a 'VText'
--- * 'component', 'vcomp' — build a 'VComp' ('vcomp' is a synonym for 'component')
+-- * 'vcomp' — build a 'VComp' (embed a 'SomeComponent'; 'component' builds the 'Component' itself)
 -- * 'fragment', 'vfrag', 'fragment_', 'vfrag_' — build a 'VFrag'
 -- * ('+>') — key and mount a child 'Component'
 --
@@ -231,20 +223,14 @@
 -- == Composition
 --
 -- @miso@ 'Component' can contain other 'Component'. This is
--- accomplished through the 'Component' mounting combinator ('+>'). This combinator
--- is responsible for encoding a typed 'Component' hierarchy, allowing 'Component'
--- type-safe read-only access to their @parent@ model state.
---
--- This combinator unifies the parent @model@ with the child @parent@, and
--- subsequently the grandchild @parent@ unifies with the child @model@. This
--- gives us a correct-by-construction 'Component' hierarchy.
+-- accomplished through the 'Component' mounting combinator ('+>').
 --
 -- @
 -- ('+>')
---   :: forall child model action a . Eq child
+--   :: Eq model
 --   => 'MisoString'
---   -> 'Component' model () child action
---   -> 'View' model a
+--   -> 'Component' () model action
+--   -> 'View' a
 -- key '+>' comp = 'VComp' (Just ('toKey' key)) ('SomeComponent' () comp)
 -- @
 --
@@ -252,7 +238,7 @@
 --
 -- @
 -- viewModel :: props -> Int -> 'View' Int action
--- viewModel _ _ = 'Miso.Html.Element.div_' [ 'Miso.Html.Property.id_' "container" ] [ "counter" '+>' counter ]
+-- viewModel _ _ = 'Miso.Html.Element.div_' [ 'Miso.Html.Property.id_' "container" ] [ "counter" '+>' 'static' counter ]
 -- @
 --
 -- The @\"counter\"@ string is a unique 'Key' that identifies the 'Component' at runtime. These keys are very important when
@@ -331,7 +317,7 @@
 --   Highlight domRef -> 'io_' $ do
 --     ['Miso.FFI.QQ.js'| hljs.highlight(${domRef}) |]
 --
--- view :: props -> model -> 'View' model Action
+-- view :: props -> model -> 'View' Action
 -- view _ x =
 --   'Miso.Html.Element.code_'
 --   [ 'onCreatedWith' Highlight
@@ -350,7 +336,7 @@
 -- Unlike 'VComp' and 'VFrag', 'VText' has a one-to-one correspondence with a physical DOM node:
 -- each 'VText' in the virtual DOM maps to exactly one @Text@ node in the browser.
 --
--- The simplest way to produce a 'VText' is via the 'IsString' instance on @'View' model action@.
+-- The simplest way to produce a 'VText' is via the 'IsString' instance on @'View' action@.
 -- String literals inside a child list are automatically promoted to 'VText' nodes without
 -- any extra imports:
 --
@@ -405,7 +391,7 @@
 --
 -- data Item = Item { itemId, itemLabel :: 'MisoString' }
 --
--- renderItem :: Item -> 'View' model Action
+-- renderItem :: Item -> 'View' Action
 -- renderItem item = 'Miso.Html.Element.li_' [] [ 'textKey' (itemId item) (itemLabel item) ]
 -- @
 --
@@ -706,7 +692,7 @@
 -- Use 'getProps' inside the 'Effect' monad to read the current value of @props@:
 --
 -- @
--- update :: Action -> 'Effect' parent props Model Action
+-- update :: Action -> 'Effect' props Model Action
 -- update = \\case
 --   SomeAction -> do
 --     p <- 'getProps'
@@ -722,19 +708,6 @@
 --     …
 -- @
 --
--- === 'ROOT' — the top-level 'Component'
---
--- When a 'Component' is passed to 'startApp' (or 'miso') it has no parent.
--- The @parent@ type is specialized to 'ROOT' and @props@ is fixed to @()@:
---
--- @
--- type 'App' model action = 'Component' 'ROOT' () model action
--- @
---
--- Because there is no parent to inherit from, @props@ will always be @()@ for a
--- root-level 'Component'. You can simply ignore the first argument in 'view' and
--- skip 'getProps' in 'Miso.Types.update'.
---
 -- === Passing props to a child 'Component'
 --
 -- Use 'mountWithProps_' (keyed) or 'mountWithProps' (unkeyed) in the parent's 'view' to
@@ -745,8 +718,8 @@
 --   :: ('Eq' child, 'Eq' props)
 --   => 'MisoString'
 --   -> props
---   -> 'Component' parent props child action
---   -> 'View' parent a
+--   -> 'Component' props child action
+--   -> 'View' a
 -- @
 --
 -- === Example: child reading parent-supplied props
@@ -762,16 +735,16 @@
 -- -----------------------------------------------------------------------------
 -- -- Child component
 -- --
--- --                  parent      props    model  action
--- --                  |           |        |      |
--- child :: 'Component' ParentModel Greeting ()     ChildAction
--- child = 'vcomp' () updateChild viewChild
+-- --                    props    model  action
+-- --                    |        |      |
+-- child :: 'Component' Greeting ()     ChildAction
+-- child = 'component' () updateChild viewChild
 --   where
---     viewChild :: Greeting -> () -> 'View' () ChildAction
+--     viewChild :: Greeting -> () -> 'View' ChildAction
 --     viewChild (Greeting g) _ =
 --       'Miso.Html.Element.div_' [] [ 'text' ("Hello, " <> g <> "!") ]
 --
---     updateChild :: ChildAction -> 'Effect' ParentModel Greeting () ChildAction
+--     updateChild :: ChildAction -> 'Effect' Greeting () ChildAction
 --     updateChild = \\case
 --       ReadGreeting -> do
 --         Greeting g <- 'getProps'
@@ -779,9 +752,9 @@
 -- -----------------------------------------------------------------------------
 -- -- Parent component: owns the greeting, passes it to the child as props
 -- parent :: 'App' ParentModel ParentAction
--- parent = 'vcomp' (ParentModel \"World\") 'noop' viewParent
+-- parent = 'component' (ParentModel \"World\") 'noop' viewParent
 --   where
---     viewParent :: () -> ParentModel -> 'View' ParentModel ParentAction
+--     viewParent :: () -> ParentModel -> 'View' ParentAction
 --     viewParent _ (ParentModel g) = 'mountWithProps_' "child" (Greeting g) child
 -- -----------------------------------------------------------------------------
 -- newtype ParentModel = ParentModel 'MisoString' deriving ('Eq')
@@ -824,7 +797,7 @@
 --   | MailError   'MisoString'
 --
 -- myComp :: 'Component' parent props model Action
--- myComp = ('vcomp' m u v) { 'mailbox' = 'checkMail' ReceivedMsg MailError }
+-- myComp = ('component' m u v) { 'mailbox' = 'checkMail' ReceivedMsg MailError }
 -- @
 --
 -- === Looking up a 'ComponentId'
@@ -842,18 +815,6 @@
 -- @
 --
 -- * "Miso.PubSub" — publish\/subscribe pattern for fan-out messaging across unrelated components.
---
--- == Synchronous communication
---
--- * "Miso.Binding"
---
--- Experimental support for data bindings (where 'Component' model can synchronize fields via a 'Miso.Lens.Lens' in response to model differences along the parent-child relationship). See the "Miso.Binding" module for more information, and the [miso-reactive](https://github.com/haskell-miso/miso-reactive) example. *Warning*: This is still considered experimental.
---
--- == Parent access
---
--- * 'parent'
---
--- While not direct communication, a 'Component' can asynchronously receive read-only access to its @parent@ state via the 'parent' function.
 --
 -- = Subscriptions
 --
@@ -1144,7 +1105,7 @@
 --
 -- import "Miso.FFI.QQ" ('Miso.FFI.QQ.js')
 --
--- update :: Action -> 'Miso.Effect.Effect' parent props model Action
+-- update :: Action -> 'Miso.Effect.Effect' props model Action
 -- update = \\case
 --   Log msg -> 'io_' ['Miso.FFI.QQ.js'| console.log(${msg}) |]
 --
@@ -1221,7 +1182,7 @@
 -- the parsed route (or a 'Miso.Router.RoutingError') to your 'update' function:
 --
 -- @
--- app = ('vcomp' m u v) { 'subs' = [ 'Miso.Router.routerSub' HandleRoute ] }
+-- app = ('component' m u v) { 'subs' = [ 'Miso.Router.routerSub' HandleRoute ] }
 --
 -- update = \\case
 --   HandleRoute (Right Index)       -> page 'Miso.Lens..=' HomePage
@@ -1529,7 +1490,7 @@
 --
 -- @
 -- main :: IO ()
--- main = 'prerender' 'defaultEvents' $ ('vcomp' () 'noop' $ \\_ () -> "hello world") { 'logLevel' = 'DebugPrerender' }
+-- main = 'prerender' 'defaultEvents' $ ('component' () 'noop' $ \\_ () -> "hello world") { 'logLevel' = 'DebugPrerender' }
 -- @
 --
 -- Assuming the JS / WASM payload and @index.html@ are delivered together from the web server, the console should output below
@@ -1551,7 +1512,7 @@
 --
 -- @
 -- myComp :: 'App' Model Action
--- myComp = ('vcomp' defaultModel updateModel viewModel)
+-- myComp = ('component' defaultModel updateModel viewModel)
 --   { 'hydrateModel' = Just $ do
 --       val <- 'Miso.DSL.jsg' "window" 'Miso.DSL.!' "__initialModel__"
 --       'Miso.DSL.fromJSValUnchecked' val
@@ -1562,7 +1523,7 @@
 -- in a @\<script\>@ tag alongside the rendered HTML:
 --
 -- @
--- serverView :: Model -> 'View' Model Action
+-- serverView :: Model -> 'View' Action
 -- serverView m =
 --   'Miso.Html.Element.div_' []
 --     [ 'Miso.Html.Element.script_' [] [ 'textRaw' ("window.__initialModel__ = " \<\> 'Miso.JSON.encode' m) ]
@@ -1599,7 +1560,6 @@ module Miso
     -- ** Mail
   , mail
   , checkMail
-  , parent
   , mailParent
   , mailChildren
   , mailDescendants
@@ -1622,9 +1582,6 @@ module Miso
   , evalFile
 #endif
   , withJS
-    -- * Bindings
-    -- | Primitives for synchronizing parent and child models.
-  , module Miso.Binding
     -- * DSL
     -- | A JavaScript DSL for easy FFI interoperability
   , module Miso.DSL
@@ -1665,9 +1622,13 @@ module Miso
     -- * State management
     -- | State management for Miso applications.
   , module Miso.State
+    -- * Native mobile
+    -- | Cross thread environment detection
+  , mts
+  , bts
+  , web
   ) where
 -----------------------------------------------------------------------------
-import           Miso.Binding
 import           Miso.DSL
 import           Miso.Effect
 import           Miso.Event
@@ -1684,42 +1645,53 @@ import           Miso.Subscription
 import           Miso.Types
 import           Miso.Util
 ----------------------------------------------------------------------------
+import           GHC.StaticPtr (StaticPtr, deRefStaticPtr, staticKey)
+----------------------------------------------------------------------------
 -- | Runs an @miso@ application.
 --
 -- Assumes the pre-rendered DOM is already present.
 -- Always mounts to \<body\>. Copies page into the virtual DOM.
 --
 -- @
+-- {-# LANGUAGE StaticPointers #-}
+--
 -- main :: 'IO' ()
--- main = 'miso' 'defaultEvents' app
+-- main = 'miso' 'defaultEvents' (static ('vcomp' (mount_ app)))
 -- @
 miso
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Globally delegated Events
-  -> (URI -> App model action)
+  -> (URI -> StaticPtr SomeComponent)
   -- ^ The Component application, with the current URI as an argument
   -> IO ()
 miso events f = do
-  comp <- f <$> getURI
-  initComponent events Hydrate False comp { mountPoint = Nothing }
+  ptr <- f <$> getURI
+  case deRefStaticPtr ptr of
+    SomeComponent key props_ comp_ ->
+      initComponent events Hydrate False comp_ { mountPoint = Nothing }
+        key props_ (staticKey ptr)
 ----------------------------------------------------------------------------
 -- | Like 'miso', except discards the 'Miso.Router.URI' argument.
 --
 -- Use this function if you'd like to prerender, but not use navigation.
 --
 -- @
+-- {-# LANGUAGE StaticPointers #-}
+--
 -- main :: 'IO' ()
--- main = 'prerender' 'defaultEvents' app
+-- main = 'prerender' 'defaultEvents' (static ('vcomp' (mount_ app)))
 -- @
 prerender
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Globally delegated 'Events'
-  -> App model action
+  -> StaticPtr SomeComponent
   -- ^ 'Component' application
   -> IO ()
-prerender events comp = initComponent events Hydrate False comp { mountPoint = Nothing }
+prerender events ptr =
+  case deRefStaticPtr ptr of
+    SomeComponent key props_ comp_ ->
+      initComponent events Hydrate False comp_ { mountPoint = Nothing }
+        key props_ (staticKey ptr)
 -----------------------------------------------------------------------------
 -- | Like 'miso', except it does not perform page hydration.
 --
@@ -1729,25 +1701,28 @@ prerender events comp = initComponent events Hydrate False comp { mountPoint = N
 -- unless you are using prerendering.
 --
 -- @
+-- {-# LANGUAGE StaticPointers #-}
+--
 -- main :: 'IO' ()
--- main = 'startApp' 'defaultEvents' app
+-- main = 'startApp' 'defaultEvents' (static ('vcomp' (mount_ app)))
 -- @
 --
 startApp
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Globally delegated 'Events'
-  -> App model action
+  -> StaticPtr SomeComponent
   -- ^ 'Component' application
   -> IO ()
-startApp events = initComponent events Draw False
+startApp events ptr =
+  case deRefStaticPtr ptr of
+    SomeComponent key props_ vcomp_ ->
+      initComponent events Draw False vcomp_ key props_ (staticKey ptr)
 -----------------------------------------------------------------------------
 -- | Alias for 'Miso.miso'.
 (🍜)
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Globally delegated 'Events'
-  -> (URI -> App model action)
+  -> (URI -> StaticPtr SomeComponent)
   -- ^ 'Component' application, with the current URI as an argument
   -> IO ()
 (🍜) = miso
@@ -1761,19 +1736,22 @@ startApp events = initComponent events Draw False
 -- It is expected to be run on an empty @\<body\>@
 --
 -- @
+-- {-# LANGUAGE StaticPointers #-}
+--
 -- main :: IO ()
--- main = 'renderApp' 'defaultEvents' "my-context" app
+-- main = 'renderApp' 'defaultEvents' "my-context" (static app)
 -- @
 renderApp
-  :: Eq model
-  => Events
+  :: Events
   -- ^ Globally delegated 'Events'
   -> MisoString
   -- ^ Name of the JS object that contains the drawing context
-  -> App model action
+  -> StaticPtr SomeComponent
   -- ^ 'Component' application
   -> IO ()
-renderApp events renderer comp = do
+renderApp events renderer ptr = do
   FFI.setDrawingContext renderer
-  initComponent events Draw False comp
+  case deRefStaticPtr ptr of
+    SomeComponent key props_ comp ->
+      initComponent events Draw False comp key props_ (staticKey ptr)
 ----------------------------------------------------------------------------
