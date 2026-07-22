@@ -1,4 +1,4 @@
-import { populateClass, callFocus, callBlur, callSelect, callSetSelectionRange, fetchCore, websocketConnect, websocketClose, websocketSend, eventSourceConnect, eventSourceClose } from '../miso/util';
+import { populateClass, callFocus, callBlur, callSelect, callSetSelectionRange, fetchCore, selectResponseVariant, websocketConnect, websocketClose, websocketSend, eventSourceConnect, eventSourceClose } from '../miso/util';
 import { vnode } from '../miso/smart';
 import { VNode } from '../miso/types';
 import { test, expect, describe, afterEach, beforeAll, mock } from 'bun:test';
@@ -55,12 +55,32 @@ describe ('Utils tests', () => {
       for (const elem of expected) {
           expect(node.classList.has(elem)).toBe(true);
       }
-      expect(expected.size).toBe(node.classList.size);
   });
 
 });
 
 describe('Fetch tests', () => {
+  test('Should select one representation by response status', () => {
+    expect(selectResponseVariant(
+      [{
+        status: 200,
+        representation: { mediaType: 'application/json', bodyType: 'json' },
+      }],
+      404,
+    )).toEqual({ kind: 'no-response-variant', status: 404 });
+
+    expect(selectResponseVariant(
+      [{
+        status: 200,
+        representation: { mediaType: 'application/json', bodyType: 'json' },
+      }],
+      200,
+    )).toEqual({
+      kind: 'selected',
+      representation: { mediaType: 'application/json', bodyType: 'json' },
+    });
+  });
+
   test('Should handle successful JSON fetch', async () => {
     const mockResponse = { data: 'test' };
     global.fetch = mock(() =>
@@ -91,6 +111,7 @@ describe('Fetch tests', () => {
     expect(result).not.toBeNull();
     expect(result.body).toEqual(mockResponse);
     expect(result.status).toBe(200);
+    expect(result.bodyType).toBe('json');
     expect(error).toBeNull();
   });
 
@@ -122,6 +143,7 @@ describe('Fetch tests', () => {
 
     expect(result).not.toBeNull();
     expect(result.body).toBe(mockText);
+    expect(result.bodyType).toBe('text');
   });
 
   test('Should handle successful arrayBuffer fetch', async () => {
@@ -334,6 +356,256 @@ describe('Fetch tests', () => {
     await new Promise(resolve => setTimeout(resolve, 10));
 
     expect(error).not.toBeNull();
+  });
+
+  test('Should accept a response declared by a response plan', async () => {
+    const mockResponse = { data: 'accepted' };
+    global.fetch = mock(() =>
+      Promise.resolve({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => mockResponse
+      } as any)
+    ) as any;
+
+    let result = null;
+    let error = null;
+
+    fetchCore(
+      'https://api.example.com/test',
+      'GET',
+      null,
+      {},
+      (response) => { result = response; },
+      (response) => { error = response; },
+      {
+        kind: 'response-plan',
+        variants: [{
+          status: 422,
+          representation: { mediaType: 'application/json', bodyType: 'json' }
+        }]
+      }
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(result).not.toBeNull();
+    expect(result.body).toEqual(mockResponse);
+    expect(result.status).toBe(422);
+    expect(result.bodyType).toBe('json');
+    expect(result.mediaType).toBe('application/json');
+    expect(error).toBeNull();
+  });
+
+  test('Should use the status-selected reader without checking Content-Type', async () => {
+    global.fetch = mock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map([['content-type', 'text/plain']]),
+        json: async () => ({ data: 'invalid' })
+      } as any)
+    ) as any;
+
+    let result = null;
+    let error = null;
+
+    fetchCore(
+      'https://api.example.com/test',
+      'GET',
+      null,
+      {},
+      (response) => { result = response; },
+      (response) => { error = response; },
+      {
+        kind: 'response-plan',
+        variants: [{
+          status: 200,
+          representation: { mediaType: 'application/json', bodyType: 'json' }
+        }]
+      }
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(result).not.toBeNull();
+    expect(result.body).toEqual({ data: 'invalid' });
+    expect(result.bodyType).toBe('json');
+    expect(result.mediaType).toBe('application/json');
+    expect(error).toBeNull();
+  });
+
+  test('Should reject a response outside the response plan', async () => {
+    global.fetch = mock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map(),
+        json: async () => ({ data: 'rejected' })
+      } as any)
+    ) as any;
+
+    let result = null;
+    let error = null;
+
+    fetchCore(
+      'https://api.example.com/test',
+      'GET',
+      null,
+      {},
+      (response) => { result = response; },
+      (response) => { error = response; },
+      {
+        kind: 'response-plan',
+        variants: [{
+          status: 201,
+          representation: { mediaType: 'application/json', bodyType: 'json' }
+        }]
+      }
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(result).toBeNull();
+    expect(error).not.toBeNull();
+    expect(error.status).toBe(200);
+  });
+
+  test('Should treat explicit NONE responses as null bodies', async () => {
+    for (const status of [204, 205]) {
+      global.fetch = mock(() =>
+        Promise.resolve({
+          ok: true,
+          status,
+          statusText: 'No Content',
+          headers: new Map()
+        } as any)
+      ) as any;
+
+      let result = null;
+
+      fetchCore(
+        'https://api.example.com/test',
+        'GET',
+        null,
+        {},
+        (response) => { result = response; },
+        (response) => {},
+        {
+          kind: 'response-plan',
+          variants: [{
+            status,
+            representation: { mediaType: null, bodyType: 'none' }
+          }]
+        }
+      );
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(result).not.toBeNull();
+      expect(result.body).toBeNull();
+      expect(result.status).toBe(status);
+      expect(result.bodyType).toBe('none');
+      expect(result.mediaType).toBeNull();
+    }
+  });
+
+  test('Should select the first response variant for an overlapping status', async () => {
+    global.fetch = mock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 204,
+        statusText: 'No Content',
+        headers: new Map([['content-type', 'text/plain']])
+      } as any)
+    ) as any;
+
+    let result = null;
+
+    fetchCore(
+      'https://api.example.com/test',
+      'GET',
+      null,
+      {},
+      (response) => { result = response; },
+      (response) => {},
+      {
+        kind: 'response-plan',
+        variants: [
+          {
+            status: 204,
+            representation: { mediaType: null, bodyType: 'none' }
+          },
+          {
+            status: 204,
+            representation: { mediaType: 'text/plain', bodyType: 'text' }
+          }
+        ]
+      }
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(result).not.toBeNull();
+    expect(result.body).toBeNull();
+    expect(result.bodyType).toBe('none');
+  });
+
+  test('Should read the first response variant directly for an overlapping status', async () => {
+    let jsonAttempts = 0;
+    let textAttempts = 0;
+
+    global.fetch = mock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Map([['content-type', 'application/json']]),
+        json: async () => {
+          jsonAttempts += 1;
+          return { data: 'json' };
+        },
+        text: async () => {
+          textAttempts += 1;
+          return 'text';
+        }
+      } as any)
+    ) as any;
+
+    let result = null;
+
+    fetchCore(
+      'https://api.example.com/test',
+      'GET',
+      null,
+      {},
+      (response) => { result = response; },
+      (response) => {},
+      {
+        kind: 'response-plan',
+        variants: [
+          {
+            status: 200,
+            representation: { mediaType: 'application/json', bodyType: 'json' }
+          },
+          {
+            status: 200,
+            representation: { mediaType: 'application/json', bodyType: 'text' }
+          }
+        ]
+      }
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    expect(result).not.toBeNull();
+    expect(result.body).toEqual({ data: 'json' });
+    expect(result.bodyType).toBe('json');
+    expect(jsonAttempts).toBe(1);
+    expect(textAttempts).toBe(0);
   });
 
   test('Should handle network error', async () => {

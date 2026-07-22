@@ -1,4 +1,19 @@
 import { VTreeType, PRNG, VComp, VNode, VTree, Response } from './types';
+import type {
+  ResponseBodyType,
+  ResponsePlan,
+  ResponseVariantSelection,
+  ResponseVariant,
+} from './types';
+
+export type {
+  NoResponseVariant,
+  ResponseBodyType,
+  ResponsePlan,
+  ResponseRepresentation,
+  ResponseVariantSelection,
+  ResponseVariant,
+} from './types';
 
 /* current miso version */
 export const version: string = '1.9.0.0';
@@ -47,6 +62,46 @@ export function callSetSelectionRange(id: string, start: number, end: number, de
   delay > 0 ? setTimeout(setSetSelectionRange, delay) : setSetSelectionRange();
 }
 
+export function selectResponseVariant(
+  variants: ResponseVariant[],
+  status: number,
+): ResponseVariantSelection {
+  const variant = variants.find(variant => variant.status === status);
+  if (variant === undefined) {
+    return {
+      kind: 'no-response-variant',
+      status,
+    };
+  }
+
+  return {
+    kind: 'selected',
+    representation: variant.representation,
+  };
+}
+
+async function readResponseBody(
+  response: globalThis.Response,
+  responseType: ResponseBodyType,
+): Promise<any> {
+  switch (responseType) {
+    case 'json':
+      return response.json();
+    case 'text':
+      return response.text();
+    case 'arrayBuffer':
+      return response.arrayBuffer();
+    case 'blob':
+      return response.blob();
+    case 'bytes':
+      return response.bytes();
+    case 'formData':
+      return response.formData();
+    case 'none':
+      return null;
+  }
+}
+
 export function fetchCore (
   url : string,
   method : string,
@@ -54,7 +109,7 @@ export function fetchCore (
   requestHeaders : Record<string,string>,
   successful: (response: Response) => void,
   errorful: (response: Response) => void,
-  responseType: string /* dmj: expected response type */
+  responseType: ResponseBodyType | ResponsePlan, /* dmj: expected response type */
 ): any
 {
   var options = { method, headers: requestHeaders };
@@ -70,29 +125,47 @@ export function fetchCore (
           for (const [key, value] of response.headers) {
              headers[key] = value;
           }
-          if (!response.ok) {
+          // todo: Clean up the AI slop logic here.
+          // Also if you're not a Typescript expert this looks weird, but
+          // 1. `responseType` is a union type, and ResponseBodyType is essentially a string (restricted to certain values)
+          // 2. Unlike Sum Types, union types don't have a "tag" to discriminate on, 
+          //    and `ResponseBodyType` is erased at runtime. Hence pattern matching on whether it's a string.
+          //    Weird I know. 
+          if (typeof responseType === 'string' && !response.ok) {
             throw new Error(response.statusText);
           }
-          if (responseType == 'json') {
-            return response.json();
-          } else if (responseType == 'text') {
-            return response.text();
-          } else if (responseType === 'arrayBuffer') {
-            return response.arrayBuffer();
-          } else if (responseType === 'blob') {
-            return response.blob();
-          } else if (responseType === 'bytes') {
-            return response.bytes();
-          } else if (responseType === 'formData') {
-            return response.formData();
-          } else if (responseType === 'none') {
-            return successful({error:null, body: null, headers, status});
+          if (typeof responseType === 'string') {
+            return readResponseBody(response, responseType)
+              .then(body => ({
+                body,
+                bodyType: responseType,
+                mediaType: null,
+              }));
           }
+          const planSelection = selectResponseVariant(
+            responseType.variants,
+            response.status,
+          );
+          if (planSelection.kind !== 'selected') {
+            throw new Error(`No response variant for status: ${planSelection.status}`);
+          }
+          const representation = planSelection.representation;
+          const responseBody = representation.bodyType === 'none'
+            ? Promise.resolve(null)
+            : readResponseBody(response, representation.bodyType);
+          return responseBody.then(body => ({
+            body,
+            bodyType: representation.bodyType,
+            mediaType: representation.mediaType,
+          }));
         })
-        .then((body) => successful({error: null, body, headers, status}))
-        .catch((body) => errorful({error: null, body, headers, status})); /* error callback */
+        .then(({ body, bodyType, mediaType }) =>
+          successful({error: null, body, headers, status, bodyType, mediaType})
+        )
+        // Errors do not expose a successfully selected body reader.
+        .catch((body) => errorful({error: null, body, headers, status, bodyType: null, mediaType: null})); /* error callback */
   } catch (err) {
-      errorful({ body: null, error: err.message, headers, status});
+      errorful({ body: null, error: err.message, headers, status, bodyType: null, mediaType: null});
   }
 }
 

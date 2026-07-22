@@ -107,6 +107,11 @@ module Miso.FFI
   , newFileReader
     -- ** Fetch API
   , fetch
+  , fetchResponsePlan
+  , ResponsePlan(..)
+  , ResponseVariant(..)
+  , ResponseRepresentation(..)
+  , StatusCode
   , Response (..)
     -- ** Event
   , addEventListener

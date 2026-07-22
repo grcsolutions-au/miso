@@ -38,6 +38,37 @@ function callSetSelectionRange(id, start, end, delay) {
   };
   delay > 0 ? setTimeout(setSetSelectionRange, delay) : setSetSelectionRange();
 }
+function selectResponseVariant(variants, status) {
+  const variant = variants.find((variant2) => variant2.status === status);
+  if (variant === undefined) {
+    return {
+      kind: "no-response-variant",
+      status
+    };
+  }
+  return {
+    kind: "selected",
+    representation: variant.representation
+  };
+}
+async function readResponseBody(response, responseType) {
+  switch (responseType) {
+    case "json":
+      return response.json();
+    case "text":
+      return response.text();
+    case "arrayBuffer":
+      return response.arrayBuffer();
+    case "blob":
+      return response.blob();
+    case "bytes":
+      return response.bytes();
+    case "formData":
+      return response.formData();
+    case "none":
+      return null;
+  }
+}
 function fetchCore(url, method, body, requestHeaders, successful, errorful, responseType) {
   var options = { method, headers: requestHeaders };
   if (body) {
@@ -51,27 +82,30 @@ function fetchCore(url, method, body, requestHeaders, successful, errorful, resp
       for (const [key, value] of response.headers) {
         headers[key] = value;
       }
-      if (!response.ok) {
+      if (typeof responseType === "string" && !response.ok) {
         throw new Error(response.statusText);
       }
-      if (responseType == "json") {
-        return response.json();
-      } else if (responseType == "text") {
-        return response.text();
-      } else if (responseType === "arrayBuffer") {
-        return response.arrayBuffer();
-      } else if (responseType === "blob") {
-        return response.blob();
-      } else if (responseType === "bytes") {
-        return response.bytes();
-      } else if (responseType === "formData") {
-        return response.formData();
-      } else if (responseType === "none") {
-        return successful({ error: null, body: null, headers, status });
+      if (typeof responseType === "string") {
+        return readResponseBody(response, responseType).then((body2) => ({
+          body: body2,
+          bodyType: responseType,
+          mediaType: null
+        }));
       }
-    }).then((body2) => successful({ error: null, body: body2, headers, status })).catch((body2) => errorful({ error: null, body: body2, headers, status }));
+      const planSelection = selectResponseVariant(responseType.variants, response.status);
+      if (planSelection.kind !== "selected") {
+        throw new Error(`No response variant for status: ${planSelection.status}`);
+      }
+      const representation = planSelection.representation;
+      const responseBody = representation.bodyType === "none" ? Promise.resolve(null) : readResponseBody(response, representation.bodyType);
+      return responseBody.then((body2) => ({
+        body: body2,
+        bodyType: representation.bodyType,
+        mediaType: representation.mediaType
+      }));
+    }).then(({ body: body2, bodyType, mediaType }) => successful({ error: null, body: body2, headers, status, bodyType, mediaType })).catch((body2) => errorful({ error: null, body: body2, headers, status, bodyType: null, mediaType: null }));
   } catch (err) {
-    errorful({ body: null, error: err.message, headers, status });
+    errorful({ body: null, error: err.message, headers, status, bodyType: null, mediaType: null });
   }
 }
 function websocketConnect(url, onOpen, onClose, onMessageText, onMessageJSON, onMessageBLOB, onMessageArrayBuffer, onError, textOnly) {

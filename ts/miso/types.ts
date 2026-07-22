@@ -163,12 +163,70 @@ export type DrawingContext<T> = {
   getRoot : () => T;
 };
 
+/*
+ * A response plan maps each expected HTTP status to one representation. The
+ * browser still returns one status and one Content-Type, but Miso uses only
+ * the status to select the representation, including the Fetch reader and
+ * declared media type. It does not inspect Content-Type while reading a
+ * planned response.
+ *
+ * This deliberately assumes that every response status identifies exactly
+ * one representation. MultiVerb alternatives with overlapping statuses are
+ * order-dependent, and response types that declare multiple media types use
+ * the first generated representation. Neither restriction is compile-time
+ * enforced here, so violating either assumption can decode a response with
+ * the wrong reader or parser.
+ */
+/* Types used for the Fetch API. */
+export type ResponseBodyType =
+  | 'json'
+  | 'text'
+  | 'arrayBuffer'
+  | 'blob'
+  | 'bytes'
+  | 'formData'
+  | 'none';
+
+export interface ResponseRepresentation {
+  // A bodyless response has no declared media type.
+  mediaType: string | null;
+  bodyType: ResponseBodyType;
+}
+
+export interface ResponseVariant {
+  status: number;
+  representation: ResponseRepresentation;
+}
+
+export type NoResponseVariant = {
+  kind: 'no-response-variant';
+  status: number;
+};
+
+export type ResponseVariantSelection =
+  | {
+      kind: 'selected';
+      representation: ResponseRepresentation;
+    }
+  | NoResponseVariant;
+
+export interface ResponsePlan {
+  kind: 'response-plan';
+  variants: ResponseVariant[];
+}
+
 /* dmj: used for Fetch API */
 export type Response = {
   body: any;
   status: number;
   headers: Record<string,string>;
   error: string;
+  // The reader selected by fetchCore; null means no reader was selected.
+  bodyType: ResponseBodyType | null;
+  // The declared media type selected by fetchCore; null means no representation
+  // was selected or the fixed-response API was used. Planned responses select
+  // this from the HTTP status rather than the response Content-Type header.
+  mediaType: string | null;
 };
 
 /* Information about the current component that lives on the render thread */

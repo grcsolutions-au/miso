@@ -161,7 +161,12 @@ module Miso.FFI.Internal
    , addScriptImportMap
    -- * XHR
    , fetch
+  , fetchResponsePlan
    , CONTENT_TYPE(..)
+  , ResponsePlan(..)
+  , ResponseVariant(..)
+  , ResponseRepresentation(..)
+  , StatusCode
    -- * Drawing
    , setDrawingContext
    , flush
@@ -822,7 +827,42 @@ fetch
   -- ^ content type
   -> IO ()
 {-# INLINABLE fetch #-}
-fetch url method maybeBody requestHeaders successful errorful type_ = do
+fetch url method maybeBody requestHeaders successful errorful type_ =
+  fetchWorker url method maybeBody requestHeaders successful errorful
+    (FixedResponseType type_)
+-----------------------------------------------------------------------------
+-- | Fetch using a status- and content-type-aware response plan.
+fetchResponsePlan
+  :: (FromJSVal success, FromJSVal error)
+  => MisoString
+  -- ^ url
+  -> MisoString
+  -- ^ method
+  -> Maybe JSVal
+  -- ^ body
+  -> [(MisoString, MisoString)]
+  -- ^ headers
+  -> (Response success -> IO ())
+  -- ^ successful callback
+  -> (Response error -> IO ())
+  -- ^ errorful callback
+  -> ResponsePlan
+  -- ^ response plan
+  -> IO ()
+fetchResponsePlan url method maybeBody requestHeaders successful errorful plan =
+  fetchWorker url method maybeBody requestHeaders successful errorful
+    (PlannedResponse plan)
+fetchWorker
+  :: (FromJSVal success, FromJSVal error)
+  => MisoString
+  -> MisoString
+  -> Maybe JSVal
+  -> [(MisoString, MisoString)]
+  -> (Response success -> IO ())
+  -> (Response error -> IO ())
+  -> FetchResponseType
+  -> IO ()
+fetchWorker url method maybeBody requestHeaders successful errorful responseType = do
   successful_ <- toJSVal =<< asyncCallback1 (successful <=< fromJSValUnchecked)
   errorful_ <- toJSVal =<< asyncCallback1 (errorful <=< fromJSValUnchecked)
   moduleMiso <- jsg "miso"
@@ -833,7 +873,7 @@ fetch url method maybeBody requestHeaders successful errorful type_ = do
     o <- create
     forM_ requestHeaders $ \(k,v) -> set k v o
     pure o
-  typ <- toJSVal type_
+  typ <- toJSVal responseType
   void $ moduleMiso # "fetchCore" $
     [ url_
     , method_
@@ -854,6 +894,49 @@ data CONTENT_TYPE
   | FORM_DATA
   | NONE
   deriving (Show, Eq)
+
+-- Unknown or missing JavaScript reader tags are intentionally represented as
+-- Nothing so callers can distinguish them from the explicit NONE reader.
+instance FromJSVal CONTENT_TYPE where
+  fromJSVal value = do
+    bodyType <- fromJSVal value :: IO (Maybe MisoString)
+    pure $ bodyType >>= \case
+      "json" -> Just JSON
+      "text" -> Just TEXT
+      "arrayBuffer" -> Just ARRAY_BUFFER
+      "blob" -> Just BLOB
+      "bytes" -> Just BYTES
+      "formData" -> Just FORM_DATA
+      "none" -> Just NONE
+      _ -> Nothing
+
+-- | A response body policy for one HTTP status. The representation carries
+-- the media type declared by Servant and the reader Miso should use for that
+-- status. Planned responses intentionally do not negotiate Content-Type at
+-- runtime.
+data ResponseVariant = ResponseVariant
+  { responseStatusCode :: StatusCode
+  , responseRepresentation :: ResponseRepresentation
+  }
+
+-- | A declared response media type paired with the JavaScript reader that
+-- consumes it. A 'Nothing' media type is used for an explicit no-body reader.
+data ResponseRepresentation = ResponseRepresentation
+  { representationMediaType :: Maybe MisoString
+  , representationBodyType :: CONTENT_TYPE
+  }
+
+-- | A status-selected response policy for 'fetchResponsePlan'.
+data ResponsePlan = ResponsePlan
+  { responseVariants :: [ResponseVariant]
+  }
+
+data FetchResponseType
+  = FixedResponseType CONTENT_TYPE
+  | PlannedResponse ResponsePlan
+
+-- | An HTTP response status code.
+type StatusCode = Int
 -----------------------------------------------------------------------------
 instance ToJSVal CONTENT_TYPE where
   toJSVal = \case
@@ -871,6 +954,44 @@ instance ToJSVal CONTENT_TYPE where
       toJSVal ("formData" :: MisoString)
     NONE ->
       toJSVal ("none" :: MisoString)
+  {-# INLINE toJSVal #-}
+-----------------------------------------------------------------------------
+instance ToJSVal ResponseVariant where
+  toJSVal (ResponseVariant status representation) = do
+    status_ <- toJSVal status
+    representation_ <- toJSVal representation
+    object <- createWith
+      [ (ms ("status" :: MisoString), status_)
+      , (ms ("representation" :: MisoString), representation_)
+      ]
+    toJSVal object
+  {-# INLINE toJSVal #-}
+-----------------------------------------------------------------------------
+instance ToJSVal ResponseRepresentation where
+  toJSVal (ResponseRepresentation mediaType bodyType) = do
+    mediaType_ <- toJSVal mediaType
+    bodyType_ <- toJSVal bodyType
+    object <- createWith
+      [ (ms ("mediaType" :: MisoString), mediaType_)
+      , (ms ("bodyType" :: MisoString), bodyType_)
+      ]
+    toJSVal object
+  {-# INLINE toJSVal #-}
+-----------------------------------------------------------------------------
+instance ToJSVal ResponsePlan where
+  toJSVal (ResponsePlan variants) = do
+    kind_ <- toJSVal (ms ("response-plan" :: MisoString))
+    variants_ <- toJSVal variants
+    object <- createWith
+      [ (ms ("kind" :: MisoString), kind_)
+      , (ms ("variants" :: MisoString), variants_)
+      ]
+    toJSVal object
+  {-# INLINE toJSVal #-}
+-----------------------------------------------------------------------------
+instance ToJSVal FetchResponseType where
+  toJSVal (FixedResponseType contentType) = toJSVal contentType
+  toJSVal (PlannedResponse plan) = toJSVal plan
   {-# INLINE toJSVal #-}
 -----------------------------------------------------------------------------
 -- | Flush is used to force a draw of the render tree. This is currently
@@ -1214,6 +1335,11 @@ data Response body
     -- ^ Response headers
   , errorMessage :: Maybe MisoString
     -- ^ Optional error message
+  , bodyType :: Maybe CONTENT_TYPE
+    -- ^ Body reader selected by the Fetch API; 'Nothing' means unavailable
+  , responseMediaType :: Maybe MisoString
+    -- ^ Declared media type selected by the response plan; 'Nothing' means no
+    -- planned representation was selected or the fixed-response API was used
   , body :: body
     -- ^ Response body
   }
@@ -1227,8 +1353,11 @@ instance FromJSVal body => FromJSVal (Response body) where
     status_ <- fromJSVal =<< getProp "status" (Object o)
     headers_ <- fromJSVal =<< getProp "headers" (Object o)
     errorMessage_ <- fromJSVal =<< getProp "error" (Object o)
+    bodyType_ <- fromJSVal =<< getProp "bodyType" (Object o)
+    responseMediaType_ <- fromJSVal =<< getProp "mediaType" (Object o)
     body_ <- fromJSVal =<< getProp "body" (Object o)
-    pure (Response <$> status_ <*> headers_ <*> errorMessage_ <*> body_)
+    pure (Response <$> status_ <*> headers_ <*> errorMessage_ <*> bodyType_
+      <*> responseMediaType_ <*> body_)
   {-# INLINE fromJSVal #-}
 -----------------------------------------------------------------------------
 -- | [Event](https://developer.mozilla.org/en-US/docs/Web/API/Event/Event)
