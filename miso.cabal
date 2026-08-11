@@ -303,6 +303,11 @@ library
     base          < 5,
     bytestring    < 0.13,
     containers    < 0.9,
+    cookie,
+    http-api-data,
     transformers  < 0.7,
     mtl           < 2.4,
-    text          < 2.2
+    tagged,
+    text          < 2.2,
+    time-compat,
+    uuid-types
